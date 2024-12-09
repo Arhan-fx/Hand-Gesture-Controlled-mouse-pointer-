@@ -1,0 +1,109 @@
+import cv2
+import mediapipe as mp
+import math
+import pyautogui
+import screeninfo
+import threading
+import time
+
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands()
+mp_drawing = mp.solutions.drawing_utils
+
+camera = cv2.VideoCapture(0)
+
+screen = screeninfo.get_monitors()[0]
+screen_width, screen_height = screen.width, screen.height
+
+THUMB_INDEX_THRESHOLD = 50
+THUMB_PINKY_THRESHOLD = 150
+
+calibrated_thumb_index_dist = None
+calibrated_thumb_pinky_dist = None
+
+def calculate_distance(point1, point2):
+    return math.sqrt((point2[0] - point1[0]) ** 2 + (point2[1] - point1[1]) ** 2)
+
+def calibrate_gestures(finger_coords):
+    global calibrated_thumb_index_dist, calibrated_thumb_pinky_dist
+    calibrated_thumb_index_dist = calculate_distance(finger_coords[0], finger_coords[1])
+    calibrated_thumb_pinky_dist = calculate_distance(finger_coords[0], finger_coords[4])
+    print("Calibration complete: Thumb-Index Distance:", calibrated_thumb_index_dist)
+    print("Calibration complete: Thumb-Pinky Distance:", calibrated_thumb_pinky_dist)
+
+def move_mouse(x, y):
+    mouse_x = int(x * screen_width)
+    mouse_y = int(y * screen_height)
+    pyautogui.moveTo(mouse_x, mouse_y)
+
+def detect_gesture(finger_coords):
+    global calibrated_thumb_index_dist, calibrated_thumb_pinky_dist
+    
+    if calibrated_thumb_index_dist is None or calibrated_thumb_pinky_dist is None:
+        calibrate_gestures(finger_coords)
+        return
+
+    thumb_index_dist = calculate_distance(finger_coords[0], finger_coords[1])
+    thumb_pinky_dist = calculate_distance(finger_coords[0], finger_coords[4])
+
+    thumb_index_close = calibrated_thumb_index_dist * 0.5
+    thumb_pinky_open = calibrated_thumb_pinky_dist * 1.5
+
+    if thumb_index_dist < thumb_index_close:  # Pinch gesture
+        pyautogui.click()
+    elif thumb_pinky_dist > thumb_pinky_open:  # Open hand gesture
+        pyautogui.rightClick()
+
+def gui_worker(image, hand_landmarks):
+    finger_coords = [
+        (int(hand_landmarks.landmark[i].x * image.shape[1]), 
+         int(hand_landmarks.landmark[i].y * image.shape[0]))
+        for i in [4, 8, 12, 16, 20]
+    ]
+    hand_center = (
+        hand_landmarks.landmark[0].x, 
+        hand_landmarks.landmark[0].y
+    )
+    move_mouse(hand_center[0], hand_center[1])
+    detect_gesture(finger_coords)
+
+prev_time = 0  
+
+while True:
+    ret, image = camera.read()
+    if not ret:
+        print("Failed to grab frame")
+        break
+
+    image = cv2.flip(image, 1)   
+    image = cv2.resize(image, (640, 480))   
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb_image)
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(
+                image, 
+                hand_landmarks, 
+                mp_hands.HAND_CONNECTIONS, 
+                mp_drawing.DrawingSpec(color=(0, 0, 0), thickness=2, circle_radius=2),
+                mp_drawing.DrawingSpec(color=(0, 0, 0), thickness=2)
+            )
+
+
+            threading.Thread(target=gui_worker, args=(image, hand_landmarks)).start()
+
+    curr_time = time.time()
+    fps = 1 / (curr_time - prev_time)
+    prev_time = curr_time
+
+    
+    cv2.putText(image, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
+    cv2.imshow("Hand Tracking for Mouse Control", image)
+
+    if cv2.waitKey(1) & 0xFF == 27:  
+        break
+
+camera.release()
+cv2.destroyAllWindows()
